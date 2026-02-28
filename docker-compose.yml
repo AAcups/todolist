@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # PostgreSQL 数据库
+  # PostgreSQL 数据库（临时，无持久化）
   postgres:
     image: postgres:15-alpine
     container_name: todolist-postgres
@@ -9,17 +9,16 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-todo}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-todo}
       POSTGRES_DB: ${POSTGRES_DB:-todo_db}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    # 无 volume 挂载，数据仅在容器内存
     ports:
       - "5432:5432"
     networks:
       - todolist-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-todo}"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   # 后端 API
   backend:
@@ -32,6 +31,7 @@ services:
       DB_NAME: ${POSTGRES_DB:-todo_db}
       JWT_SECRET: ${JWT_SECRET:-supersecret}
       PORT: 3000
+      NODE_ENV: production
     ports:
       - "3000:3000"
     networks:
@@ -50,9 +50,6 @@ services:
       - todolist-network
     depends_on:
       - backend
-
-volumes:
-  postgres_data:
 
 networks:
   todolist-network:

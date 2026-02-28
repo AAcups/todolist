@@ -12,10 +12,10 @@ env:
   IMAGE_NAME_FRONTEND: ${{ github.repository }}-frontend
 
 jobs:
-  # ==================== CI 阶段 ====================
+  # ==================== CI 阶段：构建和测试 ====================
   
-  # 构建后端
-  build-backend:
+  # 构建并测试后端
+  build-test-backend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout 代码
@@ -26,14 +26,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 安装依赖
+      - name: 安装后端依赖
         working-directory: ./backend
         run: npm install
-
-      - name: 运行测试
-        working-directory: ./backend
-        run: npm test || echo "No tests specified"
-        continue-on-error: true
 
   # 构建前端
   build-frontend:
@@ -47,21 +42,105 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 安装依赖
+      - name: 安装前端依赖
         working-directory: ./frontend
         run: npm install
 
-      - name: 构建生产版本
+      - name: 构建前端
         working-directory: ./frontend
         run: npm run build
 
-  # ==================== CD 阶段 ====================
+  # ==================== API 集成测试 ====================
   
-  # 构建并推送 Docker 镜像
-  docker-build-push:
-    needs: [build-backend, build-frontend]
+  api-test:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    needs: [build-test-backend]
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: todo
+          POSTGRES_PASSWORD: todo
+          POSTGRES_DB: todo_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖
+        working-directory: ./backend
+        run: npm install
+
+      - name: 启动后端服务
+        working-directory: ./backend
+        env:
+          DB_HOST: localhost
+          DB_USER: todo
+          DB_PASS: todo
+          DB_NAME: todo_db
+          JWT_SECRET: test-secret-key
+          PORT: 3000
+        run: |
+          node app.js &
+          # 等待数据库初始化和服务启动
+          sleep 10
+          # 检查服务是否运行
+          curl -f http://localhost:3000/health || exit 1
+
+      - name: 测试 API - 注册
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost:3000/api/register \
+            -H "Content-Type: application/json" \
+            -d '{"username":"testuser","password":"test123"}')
+          echo "注册响应: $RESPONSE"
+          echo "$RESPONSE" | grep -q "注册成功" || exit 1
+
+      - name: 测试 API - 登录
+        id: login
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost:3000/api/login \
+            -H "Content-Type: application/json" \
+            -d '{"username":"testuser","password":"test123"}')
+          echo "登录响应: $RESPONSE"
+          TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          [ -n "$TOKEN" ] || exit 1
+
+      - name: 测试 API - 创建 Todo
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost:3000/api/todos \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ steps.login.outputs.token }}" \
+            -d '{"content":"测试 Todo 项目"}')
+          echo "创建 Todo 响应: $RESPONSE"
+          echo "$RESPONSE" | grep -q "id" || exit 1
+
+      - name: 测试 API - 获取 Todo 列表
+        run: |
+          RESPONSE=$(curl -s http://localhost:3000/api/todos \
+            -H "Authorization: Bearer ${{ steps.login.outputs.token }}")
+          echo "Todo 列表响应: $RESPONSE"
+          echo "$RESPONSE" | grep -q "测试 Todo 项目" || exit 1
+
+  # ==================== CD 阶段：Docker 镜像构建 ====================
+  
+  docker-build-push:
+    needs: [build-frontend, api-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     permissions:
       contents: read
       packages: write
@@ -88,7 +167,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: 构建并推送后端镜像
         uses: docker/build-push-action@v5
@@ -108,7 +186,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: 构建并推送前端镜像
         uses: docker/build-push-action@v5
@@ -120,38 +197,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 部署到测试服务器
+  # ==================== 可选：部署到测试服务器 ====================
+  
   deploy:
     needs: docker-build-push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/dev'
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout 代码
-        uses: actions/checkout@v4
-
-      - name: 部署到测试服务器
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
-          script: |
-            cd ${{ secrets.DEPLOY_PATH || '/opt/todolist' }}
-            
-            # 拉取最新代码
-            git pull origin dev
-            
-            # 登录 GitHub Container Registry
-            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            
-            # 拉取最新镜像
-            docker-compose pull
-            
-            # 重启服务
-            docker-compose down
-            docker-compose up -d
-            
-            # 清理旧镜像
-            docker image prune -f
-            
-            echo "✅ 部署完成！"
+      - name: 部署提示
+        run: |
+          echo "✅ Docker 镜像已构建并推送到 GHCR"
+          echo "📦 后端镜像: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}"
+          echo "📦 前端镜像: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_FRONTEND }}"
+          echo ""
+          echo "💡 要启用自动部署，请在仓库 Secrets 中配置："
+          echo "   - DEPLOY_HOST: 服务器地址"
+          echo "   - DEPLOY_USER: SSH 用户名"
+          echo "   - DEPLOY_KEY: SSH 私钥"
+          echo "   - DEPLOY_PATH: 部署路径"
