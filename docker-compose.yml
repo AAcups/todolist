@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: todolist-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-todo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-todo}
+      POSTGRES_DB: ${POSTGRES_DB:-todo_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - todolist-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-todo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 后端 API
+  backend:
+    build: ./backend
+    container_name: todolist-backend
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:-todo}
+      DB_PASS: ${POSTGRES_PASSWORD:-todo}
+      DB_NAME: ${POSTGRES_DB:-todo_db}
+      JWT_SECRET: ${JWT_SECRET:-supersecret}
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    networks:
+      - todolist-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 前端
+  frontend:
+    build: ./frontend
+    container_name: todolist-frontend
+    ports:
+      - "80:80"
+    networks:
+      - todolist-network
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+
+networks:
+  todolist-network:
+    driver: bridge
